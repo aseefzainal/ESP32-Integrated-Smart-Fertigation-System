@@ -4,6 +4,31 @@
 #include <ArduinoJson.h>
 
 //--------------------------------------------------------------------------------------
+// Pin Declaration
+//--------------------------------------------------------------------------------------
+#define M1 23 // Water pump 1
+#define M2 19 // Water pump 2
+#define M3 4  // Water pump 3
+#define M4 2  // Water pump 4
+
+#define V1 18 // Solenoid Valve 1
+#define V2 5  // Solenoid Valve 2
+#define V3 17 // Solenoid Valve 3
+#define V4 16 // Solenoid Valve 4
+
+#define TRIG_AB_PIN_AB_TANK 32 // Ultrasonic as Water Level AB Tank
+#define ECHO_AB_PIN_AB_TANK 33
+#define TRIG_AB_PIN_TANK_MIX 25 // Ultrasonic as Water Level Mix Tank
+#define ECHO_AB_PIN_TANK_MIX 26
+
+#define SOIL_MOISTURE_PIN 34
+
+//--------------------------------------------------------------------------------------
+// Project Configuration
+//--------------------------------------------------------------------------------------
+// int projectID = 8;
+int projectID = 42;
+//--------------------------------------------------------------------------------------
 // Internet connection Configuration
 //--------------------------------------------------------------------------------------
 // Wi-Fi credentials
@@ -31,11 +56,11 @@ void connectToWiFi()
 //--------------------------------------------------------------------------------------
 // MQTT Broker Configuration
 //--------------------------------------------------------------------------------------
-const char *mqtt_broker = "64.227.7.210"; // Digital Ocean
+const char *mqtt_broker = "157.245.158.126"; // Digital Ocean
 // const char *mqtt_broker = "broker.mqttdashboard.com"; // HiveMQ Broker
 // const char* mqtt_broker = "test.mosquitto.org"; // Mosquitto Broker
 // const char* mqtt_broker = 127.0.0.1; // Localhost
-const char *mqtt_username = "";
+const char *mqtt_username = "mqtt_user";
 const char *mqtt_password = "";
 const int mqtt_port = 1883;
 // const char *mqtt_client_id = "1234567"; // Define the MQTT client ID
@@ -52,7 +77,8 @@ const long interval = 5000; // Interval to send data (in milliseconds)
 unsigned long startMillis = 0;
 unsigned long durationMillis = 0;
 bool timerActive = false;
-int currentInputId = 0; // Variable to store current input ID
+int currentInputId = 0;    // Variable to store current input ID
+int currentScheduleId = 0; // Variable to store current schedule ID
 
 // Client setup
 WiFiClient espClient;
@@ -83,51 +109,57 @@ void callback(char *topic, byte *payload, unsigned int length)
   StaticJsonDocument<256> jsonDoc;
   deserializeJson(jsonDoc, payload, length);
 
-  int inputId = jsonDoc["inputId"];
-  int slug = jsonDoc["slug"];
-  bool status = jsonDoc["status"];
-  int duration = jsonDoc["duration"]; // in minutes
-  int limitSensor = jsonDoc["limitSensor"];
+  int currentProjectId = jsonDoc["projectId"];
 
-  Serial.println("Message received:");
-  Serial.print("Input ID: ");
-  Serial.println(inputId);
-  Serial.print("Input Slug: ");
-  Serial.println(slug);
-  Serial.print("Status: ");
-  Serial.println(status);
-  Serial.print("Duration: ");
-  Serial.println(duration);
-  Serial.print("Limit Sensor: ");
-  Serial.println(limitSensor);
+  if (currentProjectId == projectID)
+  {
+    int inputId = jsonDoc["inputId"];
+    String slug = jsonDoc["slug"];
+    bool status = jsonDoc["status"];
+    int duration = jsonDoc["duration"]; // in minutes
+    int limitSensor = jsonDoc["limitSensor"];
+    int scheduleId = jsonDoc["scheduleId"];
 
-  // Check if status is true to start the timer
-  if (status)
-  {
-    currentInputId = inputId;
-    startMillis = millis();
-    durationMillis = duration * 60000; // Convert minutes to milliseconds
-    timerActive = true;
-    Serial.println("Timer started.");
-  }
-  else
-  {
-    // If status is false, stop the timer immediately
-    timerActive = false;
-    Serial.println("Timer stopped manually.");
+    Serial.println("Message received:");
+    Serial.print("Project ID: ");
+    Serial.println(currentProjectId);
+    Serial.print("Input ID: ");
+    Serial.println(inputId);
+    Serial.print("Input Slug: ");
+    Serial.println(slug);
+    Serial.print("Status: ");
+    Serial.println(status);
+    Serial.print("Duration: ");
+    Serial.println(duration);
+    Serial.print("Limit Sensor: ");
+    Serial.println(limitSensor);
+    Serial.print("Schedule ID: ");
+    Serial.println(scheduleId);
+
+    // Check if status is true to start the timer
+    if (status)
+    // if (status)
+    {
+      currentScheduleId = scheduleId;
+      currentInputId = inputId;
+      startMillis = millis();
+      durationMillis = duration * 60000; // Convert minutes to milliseconds
+      timerActive = true;
+      Serial.println("Timer started.");
+    }
+    else
+    {
+      // If status is false, stop the timer immediately
+      timerActive = false;
+      Serial.println("Timer stopped manually.");
+    }
   }
 }
 
-//--------------------------------------------------------------------------------------
-// Project Configuration
-//--------------------------------------------------------------------------------------
-// int projectID = 6;
-int projectID = 42;
-
 // List Sensor ID
 // 1. EC Sensor
-// 2. Float AB Sensor
-// 3. Float AB Sensor (%)
+// 2. Float AB Tank Sensor
+// 3. Float Mix Tank Sensor (%)
 // 4. Water Temperature Sensor
 // 5. Soil Sensor 1
 // 6. Soil Sensor 2
@@ -138,9 +170,85 @@ int projectID = 42;
 // float humidity = 0;
 // int lightLevel = 0;
 
+//--------------------------------------------------------------------------------------
+// Ultrasonic Sensor Configuration (Water Level)
+//--------------------------------------------------------------------------------------
+// Define variables for duration and distance for each sensor
+long durationTank;
+int distanceTank;
+
+long durationABTank;
+int distanceABTank;
+const int ABTankHeight = 111; // Height of the water tank in mm (8.5 cm)
+
+long durationMixTank;
+int distanceMixTank;
+const int mixTankHeight = 72; // Height of the water tank in mm (8.5 cm)
+// const int mixTankHeight = 90; // Height of the water tank in mm (8.5 cm)
+// const int mixTankHeight = 65; // Height of the water tank in mm (8.5 cm)
+
+#define SOUND_SPEED 0.034
+#define CM_TO_INCH 0.393701
+
+// Function to calculate water level percentage
+int waterLevel(int TRIG, int ECHO, int TankHeight)
+{
+  // Trigger ultrasonic sensor to send a pulse
+  digitalWrite(TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+
+  // Read the echoPin and calculate the duration of the pulse
+  long duration = pulseIn(ECHO, HIGH);
+  // Calculate the distance (duration / 2) / 29.1 = cm, convert to mm
+  int distance = (duration / 2) / 29.1 * 10;
+  // float  distanceCm = duration * SOUND_SPEED / 2;
+  // float  distanceInch = distanceCm * CM_TO_INCH;
+
+  // Calculate water level in mm and percentage
+  int waterLevel = TankHeight - distance;           // Water level in mm
+  int percentage = (waterLevel * 100) / TankHeight; // Water level percentage
+
+  // Ensure percentage is within 0-100 range
+  if (percentage > 100)
+  {
+    return 100;
+  }
+  else if (percentage < 0)
+  {
+    return 0;
+  }
+  return percentage;
+}
+
+//--------------------------------------------------------------------------------------
+// Soil Moisture Sensor Configuration
+//--------------------------------------------------------------------------------------
+String soilMoisture(int soilMoistureValue)
+{
+  if (soilMoistureValue < 1)
+  {
+    return "WET";
+  }
+  else
+  {
+    return "DRY";
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
+
+  pinMode(TRIG_AB_PIN_AB_TANK, OUTPUT);
+  pinMode(ECHO_AB_PIN_AB_TANK, INPUT);
+  pinMode(TRIG_AB_PIN_TANK_MIX, OUTPUT);
+  pinMode(ECHO_AB_PIN_TANK_MIX, INPUT);
+
+  pinMode(SOIL_MOISTURE_PIN, INPUT);
+
   connectToWiFi();
 
   // Connect to MQTT broker
@@ -157,58 +265,56 @@ void loop()
   }
   client.loop();
 
-  // // Simulate reading from sensors
-  // temperature = random(20, 30); // Example temperature in °C
-  // humidity = random(40, 60);    // Example humidity in %
-  // lightLevel = random(0, 1024); // Example light level (0-1024)
+  //--------------------------------------------------------------------------------------
 
-  // // Prepare JSON object with sensor data
-  // StaticJsonDocument<200> jsonDoc;
-  // jsonDoc["temperature"] = temperature;
-  // jsonDoc["humidity"] = humidity;
-  // jsonDoc["lightLevel"] = lightLevel;
-
-  // // Serialize JSON object to string
-  // char jsonBuffer[200];
-  // serializeJson(jsonDoc, jsonBuffer);
-
-  // // Publish data to MQTT topic
-  // if (client.publish(topic_pub, jsonBuffer))
-  // {
-  //   Serial.println("Data sent successfully:");
-  //   Serial.println(jsonBuffer);
-  // }
-  // else
-  // {
-  //   Serial.println("Failed to send data");
-  // }
-
+  //--------------------------------------------------------------------------------------
   // Check if it's time to send data
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= interval)
   {
     previousMillis = currentMillis;
+
+    int soilMoistureValue = digitalRead(SOIL_MOISTURE_PIN);
+
+    // Calculate water levels
+    int AB_Percentage = waterLevel(TRIG_AB_PIN_AB_TANK, ECHO_AB_PIN_AB_TANK, ABTankHeight);
+    int Mix_Percentage = waterLevel(TRIG_AB_PIN_TANK_MIX, ECHO_AB_PIN_TANK_MIX, mixTankHeight);
+
+    Serial.print("AB Water Level: ");
+    Serial.print(AB_Percentage);
+    Serial.println(" %");
+
+    Serial.print("Mix Water Level: ");
+    Serial.print(Mix_Percentage);
+    Serial.println(" %");
+
+    // Print the soil moisture value to the Serial Monitor
+    Serial.print("Soil Moisture Value: ");
+    Serial.println(soilMoistureValue);
+
+    // Determine the status based on the soil moisture value
+    Serial.println("Status: " + soilMoisture(soilMoistureValue));
+
     // Prepare sensor data
     StaticJsonDocument<300> jsonDoc;
+    jsonDoc["project_id"] = projectID; // Send project_id only once
+    jsonDoc["status"] = true;          // ESP32 is ON
+
     JsonArray sensorData = jsonDoc.createNestedArray("sensor_data");
 
     JsonObject sensor1 = sensorData.createNestedObject();
-    sensor1["project_id"] = projectID;
     sensor1["sensor_id"] = 1;          // EC Sensor
     sensor1["value"] = random(0, 100); // Example value for sensor 1
 
     JsonObject sensor2 = sensorData.createNestedObject();
-    sensor2["project_id"] = projectID;
     sensor2["sensor_id"] = 3;          // Float AB Sensor (%)
     sensor2["value"] = random(0, 100); // Example value for sensor 3
 
     JsonObject sensor3 = sensorData.createNestedObject();
-    sensor3["project_id"] = projectID;
     sensor3["sensor_id"] = 4;          // Water Temperature Sensor
     sensor3["value"] = random(0, 100); // Example value for sensor 4
 
     JsonObject sensor4 = sensorData.createNestedObject();
-    sensor4["project_id"] = projectID;
     sensor4["sensor_id"] = 5;          // Soil Sensor - 1
     sensor4["value"] = random(0, 100); // Example value for sensor 5
 
@@ -220,8 +326,6 @@ void loop()
     client.publish(topic_pub, jsonBuffer);
     Serial.println("Data sent:");
     Serial.println(jsonBuffer);
-
-    // delay(5000); // Delay before sending the next data
   }
 
   // Check if timer is active and duration has passed
@@ -229,8 +333,15 @@ void loop()
   {
     // Prepare JSON to publish status off
     StaticJsonDocument<128> jsonDoc;
-    jsonDoc["inputId"] = currentInputId;
-    jsonDoc["status"] = false;
+    JsonArray statusInput = jsonDoc.createNestedArray("status_input");
+    JsonObject input = statusInput.createNestedObject();
+    input["inputId"] = currentInputId;
+    input["status"] = 0;
+
+    if (currentScheduleId != 0)
+    {
+      input["scheduleId"] = currentScheduleId;
+    }
 
     // Serialize JSON to string
     char jsonBuffer[128];
