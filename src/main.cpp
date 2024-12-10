@@ -22,6 +22,7 @@
 #define ECHO_AB_PIN_TANK_MIX 26
 
 #define SOIL_MOISTURE_PIN 34
+#define TDS_SENSOR_PIN 35
 
 //--------------------------------------------------------------------------------------
 // Project Configuration
@@ -42,6 +43,7 @@ void connectToWiFi()
     delay(500);
     Serial.print(".");
   }
+
   Serial.println("\nConnected to Wi-Fi");
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
@@ -61,20 +63,6 @@ const char *topic_sub = "switch-button";
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-// Timing Variables
-unsigned long previousMillis = 0;
-const long interval = 5000; // 5 seconds
-
-// Timer Variables
-unsigned long startMillis = 0;
-unsigned long durationMillis = 0;
-bool timerActive = false;
-int currentInputId = 0;
-int currentScheduleId = 0;
-
-String inputSlug = "";
-bool inputStatus = false;
-
 void connectToMQTTBroker()
 {
   while (!client.connected())
@@ -93,6 +81,87 @@ void connectToMQTTBroker()
     }
   }
 }
+
+//--------------------------------------------------------------------------------------
+// TDS Sensor
+//--------------------------------------------------------------------------------------
+#define VREF 3.3  // analog reference voltage(Volt) of the ADC
+#define SCOUNT 30 // sum of sample point
+
+int analogBuffer[SCOUNT]; // store the analog value in the array, read from ADC
+// int analogBufferTemp[SCOUNT];  
+int analogBufferIndex = 0;
+int copyIndex = 0;
+
+float averageVoltage = 0;
+float tdsValue = 0;
+float temperature = 29; // current temperature for compensation
+
+float conversionFactor = 0.5;                // Typical conversion factor for TDS to EC
+float ecValue = tdsValue / conversionFactor; // EC in μS/cm
+
+// float conversionFactor = 0.5;                // Typical conversion factor for TDS to EC
+// float ecValue = tdsValue / conversionFactor; // EC in μS/cm
+
+float getMedianNum(float *buffer, int size)
+{
+  float temp;
+  for (int i = 0; i < size - 1; i++)
+  {
+    for (int j = i + 1; j < size; j++)
+    {
+      if (buffer[i] > buffer[j])
+      {
+        temp = buffer[i];
+        buffer[i] = buffer[j];
+        buffer[j] = temp;
+      }
+    }
+  }
+  if (size % 2 == 0)
+  {
+    return (buffer[size / 2] + buffer[size / 2 - 1]) / 2.0;
+  }
+  else
+  {
+    return buffer[size / 2];
+  }
+}
+
+void readTdsSensor()
+{
+  float analogBufferTemp[SCOUNT];
+  for (int i = 0; i < SCOUNT; i++)
+  {
+    analogBufferTemp[i] = analogBuffer[i];
+  }
+
+  averageVoltage = getMedianNum(analogBufferTemp, SCOUNT) * (float)VREF / 4096.0;
+  float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+  float compensationVoltage = averageVoltage / compensationCoefficient;
+
+  tdsValue = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 255.86 * compensationVoltage * compensationVoltage + 857.39 * compensationVoltage) * 0.5;
+
+  float conversionFactor = 0.5; // Conversion factor for TDS to EC
+  ecValue = tdsValue / conversionFactor;
+}
+
+//--------------------------------------------------------------------------------------
+//
+//--------------------------------------------------------------------------------------
+// Timing Variables
+unsigned long previousMillis = 0;
+const long interval = 5000; // 5 seconds
+
+// Timer Variables
+unsigned long startMillis = 0;
+unsigned long durationMillis = 0;
+bool timerActive = false;
+int currentInputId = 0;
+int currentScheduleId = 0;
+
+String inputSlug = "";
+bool inputStatus = false;
 
 void callback(char *topic, byte *payload, unsigned int length)
 {
@@ -172,7 +241,7 @@ void fertilizerIrrigation(bool status)
 void waterIrrigation(bool status)
 {
   digitalWrite(M2, !status);
-  digitalWrite(V4, status);
+  digitalWrite(V4, !status);
 }
 
 void setup()
@@ -194,6 +263,13 @@ void setup()
   pinMode(TRIG_AB_PIN_TANK_MIX, OUTPUT);
   pinMode(ECHO_AB_PIN_TANK_MIX, INPUT);
   pinMode(SOIL_MOISTURE_PIN, INPUT);
+  pinMode(TDS_SENSOR_PIN, INPUT);
+
+  // set all solenoid valve is off by default
+  digitalWrite(V1, HIGH);
+  digitalWrite(V2, HIGH);
+  digitalWrite(V3, HIGH);
+  digitalWrite(V4, HIGH);
 
   // set all water pump is off by default
   digitalWrite(M1, HIGH);
@@ -216,6 +292,18 @@ void loop()
   }
   client.loop();
 
+  static unsigned long analogSampleTimepoint = millis();
+  if (millis() - analogSampleTimepoint > 40U)
+  { // Every 40 milliseconds, read the analog value from the ADC
+    analogSampleTimepoint = millis();
+    analogBuffer[analogBufferIndex] = analogRead(TDS_SENSOR_PIN); // Read the analog value and store it into the buffer
+    analogBufferIndex++;
+    if (analogBufferIndex == SCOUNT)
+    {
+      analogBufferIndex = 0;
+    }
+  }
+
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= interval)
   {
@@ -225,6 +313,8 @@ void loop()
     int AB_Percentage = waterLevel(TRIG_AB_PIN_AB_TANK, ECHO_AB_PIN_AB_TANK, 111);
     int Mix_Percentage = waterLevel(TRIG_AB_PIN_TANK_MIX, ECHO_AB_PIN_TANK_MIX, 72);
 
+    readTdsSensor(); // Get EC and PPM values
+
     StaticJsonDocument<1024> jsonDoc;
     jsonDoc["project_slug"] = projectSlug;
     jsonDoc["status"] = true;
@@ -233,7 +323,19 @@ void loop()
 
     JsonObject sensor1 = sensorData.createNestedObject();
     sensor1["sensor_slug"] = "ec";
-    sensor1["value"] = random(0, 100);
+    // sensor1["value"] = random(0, 100);
+    sensor1["value"] = ecValue;
+
+    Serial.print("TDS Value: ");
+    Serial.print(tdsValue, 0);
+    Serial.print(" ppm   ");
+    Serial.print("EC Value: ");
+    Serial.print(ecValue, 2);
+    Serial.println(" μS/cm");
+
+    // JsonObject sensor2 = sensorData.createNestedObject();
+    // sensor2["sensor_slug"] = "ppm";
+    // sensor2["value"] = tdsValue; // PPM value
 
     // JsonObject sensor2 = sensorData.createNestedObject();
     // sensor2["sensor_slug"] = "water-temperature";
@@ -283,22 +385,22 @@ void loop()
   else if (inputSlug == "v2")
   {
     Serial.println(inputSlug);
-    digitalWrite(V1, inputStatus);
+    digitalWrite(V1, !inputStatus);
   }
   else if (inputSlug == "v3")
   {
     Serial.println(inputSlug);
-    digitalWrite(V2, inputStatus);
+    digitalWrite(V2, !inputStatus);
   }
   else if (inputSlug == "v4")
   {
     Serial.println(inputSlug);
-    digitalWrite(V3, inputStatus);
+    digitalWrite(V3, !inputStatus);
   }
   else if (inputSlug == "v5")
   {
     Serial.println(inputSlug);
-    digitalWrite(V4, inputStatus);
+    digitalWrite(V4, !inputStatus);
   }
 
   if (inputSlug == "water-irrigation")
