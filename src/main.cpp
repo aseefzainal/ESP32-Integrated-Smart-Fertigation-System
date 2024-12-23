@@ -25,7 +25,7 @@
 
 #define SOIL_MOISTURE_PIN 34
 #define TDS_SENSOR_PIN 35
-const int oneWireBus = 27;  
+const int oneWireBus = 27;
 
 //--------------------------------------------------------------------------------------
 // Project Configuration
@@ -88,12 +88,12 @@ void connectToMQTTBroker()
 }
 
 //--------------------------------------------------------------------------------------
-// DS18B20 Sensor
+// Water Temperature Sensor (DS18B20)
 //--------------------------------------------------------------------------------------
 // Setup a oneWire instance to communicate with any OneWire devices
 OneWire oneWire(oneWireBus);
 
-// Pass our oneWire reference to Dallas Temperature sensor 
+// Pass our oneWire reference to Dallas Temperature sensor
 DallasTemperature sensors(&oneWire);
 
 float temperatureC = 0;
@@ -105,13 +105,13 @@ float temperatureF = 0;
 #define SCOUNT 30 // sum of sample point
 
 int analogBuffer[SCOUNT]; // store the analog value in the array, read from ADC
-// int analogBufferTemp[SCOUNT];  
+// int analogBufferTemp[SCOUNT];
 int analogBufferIndex = 0;
 int copyIndex = 0;
 
 float averageVoltage = 0;
 float tdsValue = 0;
-float temperature = 29; // current temperature for compensation
+// float temperature = 29; // current temperature for compensation
 
 float conversionFactor = 0.5;                // Typical conversion factor for TDS to EC
 float ecValue = tdsValue / conversionFactor; // EC in μS/cm
@@ -146,13 +146,13 @@ float getMedianNum(float *buffer, int size)
 
 void readDS18B20()
 {
-  sensors.requestTemperatures(); 
+  sensors.requestTemperatures();
   temperatureC = sensors.getTempCByIndex(0);
   temperatureF = sensors.getTempFByIndex(0);
-  Serial.print(temperatureC);
-  Serial.println("ºC");
-  Serial.print(temperatureF);
-  Serial.println("ºF");
+  // Serial.print(temperatureC);
+  // Serial.println("ºC");
+  // Serial.print(temperatureF);
+  // Serial.println("ºF");
 }
 
 void readTdsSensor()
@@ -164,7 +164,7 @@ void readTdsSensor()
   }
 
   averageVoltage = getMedianNum(analogBufferTemp, SCOUNT) * (float)VREF / 4096.0;
-  float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+  float compensationCoefficient = 1.0 + 0.02 * (temperatureC - 25.0);
   float compensationVoltage = averageVoltage / compensationCoefficient;
 
   tdsValue = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage - 255.86 * compensationVoltage * compensationVoltage + 857.39 * compensationVoltage) * 0.5;
@@ -174,7 +174,7 @@ void readTdsSensor()
 }
 
 //--------------------------------------------------------------------------------------
-//
+// CallBack Function and configuration
 //--------------------------------------------------------------------------------------
 // Timing Variables
 unsigned long previousMillis = 0;
@@ -189,6 +189,7 @@ int currentScheduleId = 0;
 
 String inputSlug = "";
 bool inputStatus = false;
+int limitSensor = 0;
 
 void callback(char *topic, byte *payload, unsigned int length)
 {
@@ -210,7 +211,7 @@ void callback(char *topic, byte *payload, unsigned int length)
     inputSlug = jsonDoc["slug"].as<String>();
     inputStatus = jsonDoc["status"];
     int duration = jsonDoc["duration"];
-    int limitSensor = jsonDoc["limitSensor"];
+    limitSensor = jsonDoc["limitSensor"];
     int scheduleId = jsonDoc["scheduleId"];
 
     Serial.println("Message received:");
@@ -239,6 +240,11 @@ void callback(char *topic, byte *payload, unsigned int length)
     }
   }
 }
+//--------------------------------------------------------------------------------------
+// Water Level (Ultrasonic Sensor)
+//--------------------------------------------------------------------------------------
+int AB_Percentage = 0;
+int Mix_Percentage = 0;
 
 int waterLevel(int TRIG, int ECHO, int TankHeight)
 {
@@ -255,14 +261,77 @@ int waterLevel(int TRIG, int ECHO, int TankHeight)
 
   return constrain(percentage, 0, 100);
 }
-
+//--------------------------------------------------------------------------------------
+// Soil Moisture Sensor
+//--------------------------------------------------------------------------------------
 String soilMoisture(int soilMoistureValue)
 {
   return soilMoistureValue < 1 ? "WET" : "DRY";
 }
-
-void fertilizerIrrigation(bool status)
+//--------------------------------------------------------------------------------------
+// Irrigation Configuration
+//--------------------------------------------------------------------------------------
+void fertilizerIrrigation(bool status, int mixPercentage, int currentEcSensor)
 {
+  Serial.println("Current EC Sensor: " + String(currentEcSensor));
+  Serial.println("Limit EC Sensor: " + String(limitSensor));
+  Serial.println("Mix Percentage: " + String(mixPercentage));
+
+  if (status == 1)
+  {
+    // Fill the mix tank with water until it is at least 30% full
+    if (mixPercentage < 30)
+    {
+      // on the water pump and solenoid valve
+      Serial.println("Fill the mix tank with water until it is at least 30 percent full");
+      Serial.println("ON");
+      digitalWrite(M2, !status);
+      digitalWrite(V3, !status);
+    }
+    else
+    {
+      // off the water pump and solenoid valve
+      Serial.println("Fill the mix tank with water until it is at least 30 percent full");
+      Serial.println("OFF");
+      digitalWrite(M2, status);
+      digitalWrite(V3, status);
+
+      // Add AB Solution to the mix tank when the EC Sensor reaches the limit
+      if (currentEcSensor < limitSensor)
+      {
+        Serial.println("Add AB Solution to the mix tank when the EC Sensor reaches the limit");
+        Serial.println("ON");
+        digitalWrite(M3, !status);
+        //
+        digitalWrite(M1, !status);
+        digitalWrite(V1, !status);
+      }
+      else if (currentEcSensor >= limitSensor)
+      {
+        Serial.println("Add AB Solution to the mix tank when the EC Sensor reaches the limit");
+        Serial.println("OFF");
+        digitalWrite(M3, status);
+        //
+        // digitalWrite(M1, status);
+        digitalWrite(V1, status);
+
+        // Send water from the mix tank to the plant
+        Serial.println("Send water from the mix tank to the plant");
+        Serial.println("ON");
+        digitalWrite(M1, !status);
+        digitalWrite(V2, !status);
+      }
+    }
+  }
+  else
+  {
+    digitalWrite(M1, !status);
+    digitalWrite(M2, !status);
+    digitalWrite(M3, !status);
+    digitalWrite(V1, !status);
+    digitalWrite(V2, !status);
+    digitalWrite(V3, !status);
+  }
 }
 
 void waterIrrigation(bool status)
@@ -270,7 +339,9 @@ void waterIrrigation(bool status)
   digitalWrite(M2, !status);
   digitalWrite(V4, !status);
 }
-
+//--------------------------------------------------------------------------------------
+// Setup Function
+//--------------------------------------------------------------------------------------
 void setup()
 {
   Serial.begin(115200);
@@ -313,7 +384,9 @@ void setup()
   client.setCallback(callback);
   connectToMQTTBroker();
 }
-
+//--------------------------------------------------------------------------------------
+// Loop Function
+//--------------------------------------------------------------------------------------
 void loop()
 {
   if (!client.connected())
@@ -340,11 +413,18 @@ void loop()
     previousMillis = currentMillis;
 
     int soilMoistureValue = digitalRead(SOIL_MOISTURE_PIN);
-    int AB_Percentage = waterLevel(TRIG_AB_PIN_AB_TANK, ECHO_AB_PIN_AB_TANK, 111);
-    int Mix_Percentage = waterLevel(TRIG_AB_PIN_TANK_MIX, ECHO_AB_PIN_TANK_MIX, 72);
+    AB_Percentage = waterLevel(TRIG_AB_PIN_AB_TANK, ECHO_AB_PIN_AB_TANK, 111);
+    Mix_Percentage = waterLevel(TRIG_AB_PIN_TANK_MIX, ECHO_AB_PIN_TANK_MIX, 72);
 
     readTdsSensor(); // Get EC and PPM values
     readDS18B20();
+
+    Serial.print("TDS Value: ");
+    Serial.print(tdsValue, 0);
+    Serial.print(" ppm   ");
+    Serial.print("EC Value: ");
+    Serial.print(ecValue, 2);
+    Serial.println(" μS/cm");
 
     StaticJsonDocument<1024> jsonDoc;
     jsonDoc["project_slug"] = projectSlug;
@@ -354,36 +434,29 @@ void loop()
 
     JsonObject sensor1 = sensorData.createNestedObject();
     sensor1["sensor_slug"] = "ec";
-    // sensor1["value"] = random(0, 100);
     sensor1["value"] = ecValue;
-
-    Serial.print("TDS Value: ");
-    Serial.print(tdsValue, 0);
-    Serial.print(" ppm   ");
-    Serial.print("EC Value: ");
-    Serial.print(ecValue, 2);
-    Serial.println(" μS/cm");
 
     // JsonObject sensor2 = sensorData.createNestedObject();
     // sensor2["sensor_slug"] = "ppm";
     // sensor2["value"] = tdsValue; // PPM value
 
-    // JsonObject sensor2 = sensorData.createNestedObject();
-    // sensor2["sensor_slug"] = "water-temperature";
-    // sensor2["value"] = random(0, 100);
-
-    JsonObject sensor3 = sensorData.createNestedObject();
-    sensor3["sensor_slug"] = "float-ab-percentage";
-    sensor3["value"] = AB_Percentage;
+    // JsonObject sensor3 = sensorData.createNestedObject();
+    // sensor3["sensor_slug"] = "water-temperature";
+    // sensor3["value"] = temperatureC;
+    // sensor3["value"] = random(0, 100);
 
     JsonObject sensor4 = sensorData.createNestedObject();
-    sensor4["sensor_slug"] = "float-mix-percentage";
-    sensor4["value"] = Mix_Percentage;
+    sensor4["sensor_slug"] = "float-ab-percentage";
+    sensor4["value"] = AB_Percentage;
 
     JsonObject sensor5 = sensorData.createNestedObject();
-    sensor5["sensor_slug"] = "soil-1";
-    sensor5["value"] = soilMoistureValue;
-    // sensor4["value"] = soilMoisture(soilMoistureValue);
+    sensor5["sensor_slug"] = "float-mix-percentage";
+    sensor5["value"] = Mix_Percentage;
+
+    JsonObject sensor6 = sensorData.createNestedObject();
+    sensor6["sensor_slug"] = "soil-1";
+    sensor6["value"] = soilMoistureValue;
+    // sensor6["value"] = soilMoisture(soilMoistureValue);
 
     char jsonBuffer[1024];
     serializeJson(jsonDoc, jsonBuffer);
@@ -442,7 +515,7 @@ void loop()
   else if (inputSlug == "fertilizer-irrigation")
   {
     Serial.println(inputSlug);
-    fertilizerIrrigation(inputStatus);
+    fertilizerIrrigation(inputStatus, Mix_Percentage, ecValue);
   }
 
   Serial.println(inputSlug);
@@ -469,7 +542,7 @@ void loop()
     else if (inputSlug == "fertilizer-irrigation")
     {
       Serial.println(inputSlug);
-      fertilizerIrrigation(!inputStatus);
+      fertilizerIrrigation(!inputStatus, Mix_Percentage, ecValue);
     }
 
     char jsonBuffer[128];
