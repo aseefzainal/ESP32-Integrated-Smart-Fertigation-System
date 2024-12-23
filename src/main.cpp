@@ -2,6 +2,8 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 //--------------------------------------------------------------------------------------
 // Pin Declaration
@@ -23,11 +25,14 @@
 
 #define SOIL_MOISTURE_PIN 34
 #define TDS_SENSOR_PIN 35
+const int oneWireBus = 27;  
 
 //--------------------------------------------------------------------------------------
 // Project Configuration
 //--------------------------------------------------------------------------------------
-String projectSlug = "@year_1555"; // Replace with your project slug
+String projectSlug = "@year_2435"; // Replace with your project slug
+// String projectSlug = "@year_1555"; // Replace with your project slug
+// String projectSlug = "kandis-site"; // Replace with your project slug
 
 //--------------------------------------------------------------------------------------
 // Internet connection Configuration
@@ -83,6 +88,17 @@ void connectToMQTTBroker()
 }
 
 //--------------------------------------------------------------------------------------
+// DS18B20 Sensor
+//--------------------------------------------------------------------------------------
+// Setup a oneWire instance to communicate with any OneWire devices
+OneWire oneWire(oneWireBus);
+
+// Pass our oneWire reference to Dallas Temperature sensor 
+DallasTemperature sensors(&oneWire);
+
+float temperatureC = 0;
+float temperatureF = 0;
+//--------------------------------------------------------------------------------------
 // TDS Sensor
 //--------------------------------------------------------------------------------------
 #define VREF 3.3  // analog reference voltage(Volt) of the ADC
@@ -126,6 +142,17 @@ float getMedianNum(float *buffer, int size)
   {
     return buffer[size / 2];
   }
+}
+
+void readDS18B20()
+{
+  sensors.requestTemperatures(); 
+  temperatureC = sensors.getTempCByIndex(0);
+  temperatureF = sensors.getTempFByIndex(0);
+  Serial.print(temperatureC);
+  Serial.println("ºC");
+  Serial.print(temperatureF);
+  Serial.println("ºF");
 }
 
 void readTdsSensor()
@@ -277,6 +304,9 @@ void setup()
   digitalWrite(M3, HIGH);
   digitalWrite(M4, HIGH);
 
+  // Start the DS18B20 sensor
+  sensors.begin();
+
   connectToWiFi();
 
   client.setServer(mqtt_broker, mqtt_port);
@@ -314,6 +344,7 @@ void loop()
     int Mix_Percentage = waterLevel(TRIG_AB_PIN_TANK_MIX, ECHO_AB_PIN_TANK_MIX, 72);
 
     readTdsSensor(); // Get EC and PPM values
+    readDS18B20();
 
     StaticJsonDocument<1024> jsonDoc;
     jsonDoc["project_slug"] = projectSlug;
